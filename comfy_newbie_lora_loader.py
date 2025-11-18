@@ -207,7 +207,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "NewBieLoraModelOnly": "NewBie Lora load (Model Only)",
-    "NewBieLoraLoader": "NewBie Lora load",
-    "NewBieLoraLoaderMulti": "NewBie Lora load (Multi)",
+    "NewBieLoraModelOnly": "NewBie LoRa Loader (Model Only)",
+    "NewBieLoraLoader": "NewBie LoRa Loader",
+    "NewBieLoraLoaderMulti": "NewBie LoRa Loader (Multi)",
 }
