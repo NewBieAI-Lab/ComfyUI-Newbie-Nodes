@@ -1,8 +1,10 @@
 import os
 import typing
 import math
+import json
 
 import torch
+from safetensors import safe_open
 
 import lora as comfy_lora
 import comfy.utils as comfy_utils
@@ -62,7 +64,7 @@ def estimate_lora_rank(lora_sd: dict) -> typing.Optional[float]:
     return float(sum(ranks) / len(ranks))
 
 
-def load_newbie_lora_state_dict(lora_name: str) -> dict:
+def load_newbie_lora_state_dict(lora_name: str) -> tuple:
     if not lora_name:
         raise ValueError("LoRA name is empty.")
     lora_path = folder_paths.get_full_path("loras", lora_name)
@@ -70,27 +72,35 @@ def load_newbie_lora_state_dict(lora_name: str) -> dict:
         raise FileNotFoundError(f"LoRA '{lora_name}' not found in models/loras folder.")
     if os.path.isdir(lora_path):
         raise ValueError(f"'{lora_path}' is a directory. Please select a LoRA file instead of a folder.")
+
+    metadata = {}
+    if lora_path.endswith('.safetensors'):
+        with safe_open(lora_path, framework="pt", device="cpu") as f:
+            metadata = f.metadata() or {}
+
     sd = comfy_utils.load_torch_file(lora_path)
     if not isinstance(sd, dict):
         raise ValueError(f"Loaded LoRA '{lora_name}' does not contain a valid state dict.")
-    return sd
+    return sd, metadata
 
 
 def apply_newbie_lora_to_model(
     model,
     lora_name: str,
     strength: float,
-    auto_rank_scale: bool,
-    reference_rank: float,
 ) -> comfy.model_patcher.ModelPatcher:
     if strength == 0.0:
         return model
-    lora_sd = load_newbie_lora_state_dict(lora_name)
-    rank = estimate_lora_rank(lora_sd)
+    lora_sd, metadata = load_newbie_lora_state_dict(lora_name)
+
     scale = 1.0
-    if auto_rank_scale and rank is not None and rank > 0.0 and reference_rank > 0.0:
-        scale = reference_rank / rank
-    strength = strength * scale
+    if metadata:
+        lora_rank = float(metadata.get("lora_rank", 0))
+        lora_alpha = float(metadata.get("lora_alpha", lora_rank))
+        if lora_rank > 0:
+            scale = lora_alpha / lora_rank
+
+    final_strength = strength * scale
     to_load = build_newbie_lora_key_map(model)
     patches = comfy_lora.load_lora(lora_sd, to_load, log_missing=False)
     if not patches:
@@ -100,7 +110,7 @@ def apply_newbie_lora_to_model(
     else:
         patched = model
     if hasattr(patched, "add_patches"):
-        patched.add_patches(patches, strength_patch=float(strength), strength_model=1.0)
+        patched.add_patches(patches, strength_patch=float(final_strength), strength_model=1.0)
     return patched
 
 
@@ -112,8 +122,6 @@ class NewBieLoraModelOnly:
                 "model": ("MODEL",),
                 "lora_name": (folder_paths.get_filename_list("loras"),),
                 "strength": ("FLOAT", {"default": 1.0, "min": -4.0, "max": 4.0, "step": 0.01}),
-                "auto_rank_scale": ("BOOLEAN", {"default": True}),
-                "reference_rank": ("FLOAT", {"default": 32.0, "min": 1.0, "max": 256.0, "step": 1.0}),
                 "enabled": ("BOOLEAN", {"default": True}),
             }
         }
@@ -122,10 +130,10 @@ class NewBieLoraModelOnly:
     FUNCTION = "apply"
     CATEGORY = "NewBie/LoRA"
 
-    def apply(self, model, lora_name, strength, auto_rank_scale, reference_rank, enabled=True):
+    def apply(self, model, lora_name, strength, enabled=True):
         if not enabled or not lora_name:
             return (model,)
-        patched = apply_newbie_lora_to_model(model, lora_name, strength, auto_rank_scale, reference_rank)
+        patched = apply_newbie_lora_to_model(model, lora_name, strength)
         return (patched,)
 
 
@@ -138,8 +146,6 @@ class NewBieLoraLoader:
                 "clip": ("CLIP",),
                 "lora_name": (folder_paths.get_filename_list("loras"),),
                 "strength": ("FLOAT", {"default": 1.0, "min": -4.0, "max": 4.0, "step": 0.01}),
-                "auto_rank_scale": ("BOOLEAN", {"default": True}),
-                "reference_rank": ("FLOAT", {"default": 32.0, "min": 1.0, "max": 256.0, "step": 1.0}),
                 "enabled": ("BOOLEAN", {"default": True}),
             }
         }
@@ -148,10 +154,10 @@ class NewBieLoraLoader:
     FUNCTION = "apply"
     CATEGORY = "NewBie/LoRA"
 
-    def apply(self, model, clip, lora_name, strength, auto_rank_scale, reference_rank, enabled=True):
+    def apply(self, model, clip, lora_name, strength, enabled=True):
         if not enabled or not lora_name:
             return (model, clip)
-        patched = apply_newbie_lora_to_model(model, lora_name, strength, auto_rank_scale, reference_rank)
+        patched = apply_newbie_lora_to_model(model, lora_name, strength)
         return (patched, clip)
 
 
@@ -164,8 +170,6 @@ class NewBieLoraLoaderMulti:
         required = {
             "model": ("MODEL",),
             "clip": ("CLIP",),
-            "auto_rank_scale": ("BOOLEAN", {"default": True}),
-            "reference_rank": ("FLOAT", {"default": 32.0, "min": 1.0, "max": 256.0, "step": 1.0}),
         }
         for i in range(1, cls.MAX_LORAS + 1):
             required[f"lora_name_{i}"] = (lora_list,)
@@ -177,7 +181,7 @@ class NewBieLoraLoaderMulti:
     FUNCTION = "apply"
     CATEGORY = "NewBie/LoRA"
 
-    def apply(self, model, clip, auto_rank_scale, reference_rank, **kwargs):
+    def apply(self, model, clip, **kwargs):
         patched = model
         for i in range(1, self.MAX_LORAS + 1):
             name_key = f"lora_name_{i}"
@@ -190,13 +194,7 @@ class NewBieLoraLoaderMulti:
                 continue
             if not lora_name:
                 continue
-            patched = apply_newbie_lora_to_model(
-                patched,
-                lora_name,
-                strength,
-                auto_rank_scale,
-                reference_rank,
-            )
+            patched = apply_newbie_lora_to_model(patched, lora_name, strength)
         return (patched, clip)
 
 
