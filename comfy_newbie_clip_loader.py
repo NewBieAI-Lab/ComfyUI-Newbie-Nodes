@@ -16,7 +16,7 @@ except ImportError:
 
 class NewBieCLIP:
 
-    def __init__(self, text_encoder, tokenizer, clip_model, clip_tokenizer, device="cuda", cpu_offload=False, processor=None, enable_jina_weights=True, weight_baseline_mode="mean", weight_strength=1.0, mask_normalization=True):
+    def __init__(self, text_encoder, tokenizer, clip_model, clip_tokenizer, device="cuda", cpu_offload=False, processor=None, enable_jina_weights=True, jina_mode="text_only", image_text_alpha=0.5, unnormalize_image=False, weight_baseline_mode="mean", weight_strength=1.0, mask_normalization=True):
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
         self.clip_model = clip_model
@@ -26,9 +26,12 @@ class NewBieCLIP:
         self.cpu_offload = cpu_offload
         self.original_device = device
         self.enable_jina_weights = enable_jina_weights
-        self.weight_baseline_mode = weight_baseline_mode  # "mean", "empty", "compel", or "attn_mask"
-        self.weight_strength = weight_strength  # Global weight strength multiplier
-        self.mask_normalization = mask_normalization  # Whether to normalize mask after weight application
+        self.jina_mode = jina_mode
+        self.image_text_alpha = image_text_alpha
+        self.unnormalize_image = unnormalize_image
+        self.weight_baseline_mode = weight_baseline_mode
+        self.weight_strength = weight_strength
+        self.mask_normalization = mask_normalization
         
         self.text_encoder.eval()
         self.clip_model.eval()
@@ -873,23 +876,22 @@ class NewBieCLIP:
         
         with torch.no_grad():
             if image is not None:
-                # 构建正确的消息格式
                 messages = []
-                
+
                 if system_text and system_text.strip():
                     messages.append({
                         "role": "system",
                         "content": [{"type": "text", "text": system_text.strip()}]
                     })
-                
+
                 messages.append({
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": image},
-                        {"type": "text", "text": user_text}
+                        {"type": "text", "text": user_text},
+                        {"type": "image", "image": image}
                     ]
                 })
-                
+
                 inputs = self.processor.apply_chat_template(
                     messages,
                     add_generation_prompt=True,
@@ -897,14 +899,14 @@ class NewBieCLIP:
                     return_dict=True,
                     return_tensors="pt"
                 ).to(self.device)
-                
+
                 gemma_outputs = self.text_encoder(
                     input_ids=inputs.input_ids,
                     pixel_values=inputs.pixel_values if hasattr(inputs, 'pixel_values') else None,
                     attention_mask=inputs.attention_mask,
                     output_hidden_states=True,
                 )
-                
+
                 cap_feats = gemma_outputs.hidden_states[-2]
                 attention_mask = inputs.attention_mask
             else:
@@ -917,13 +919,58 @@ class NewBieCLIP:
                 )
                 cap_feats = gemma_outputs.hidden_states[-2]
                 attention_mask = tokens.attention_mask
-            
-            text_for_clip = [user_text] if isinstance(user_text, str) else user_text
-            clip_inputs = self.clip_tokenizer(text_for_clip, return_tensors="pt", padding=True, truncation=True, max_length=8000).to(self.device)
-            # Get pooled features - hook will capture hidden states if needed
-            clip_text_embeddings = None  # Will be set by hook if available
-            clip_text_pooled = self.clip_model.get_text_features(input_ids=clip_inputs.input_ids)
-            
+
+            if image is not None and self.jina_mode in ["image_only", "weighted_mix"] and hasattr(self.clip_model, 'encode_image'):
+                print(f"[NewbieCLIP] Jina CLIP mode: {self.jina_mode}")
+                print(f"[NewbieCLIP]   Image type: {type(image)}, size: {image.size if hasattr(image, 'size') else 'N/A'}")
+
+                clip_image_raw = self.clip_model.encode_image([image])
+                print(f"[NewbieCLIP]   encode_image output type: {type(clip_image_raw)}")
+                if hasattr(clip_image_raw, 'shape'):
+                    print(f"[NewbieCLIP]   encode_image shape: {clip_image_raw.shape}")
+
+                if isinstance(clip_image_raw, list):
+                    clip_image_emb = torch.tensor(clip_image_raw).to(self.device)
+                elif not isinstance(clip_image_raw, torch.Tensor):
+                    clip_image_emb = torch.tensor(clip_image_raw).to(self.device)
+                else:
+                    clip_image_emb = clip_image_raw.to(self.device)
+
+                text_for_clip = [user_text] if isinstance(user_text, str) else user_text
+                clip_inputs = self.clip_tokenizer(text_for_clip, return_tensors="pt", padding=True, truncation=True, max_length=8000).to(self.device)
+                clip_text_emb = self.clip_model.get_text_features(input_ids=clip_inputs.input_ids)
+
+                if self.unnormalize_image:
+                    text_norm = torch.norm(clip_text_emb, p=2, dim=-1, keepdim=True)
+                    image_norm = torch.norm(clip_image_emb, p=2, dim=-1, keepdim=True)
+                    print(f"[NewbieCLIP]   Unnormalize enabled - Text norm: {text_norm.item():.4f}, Image norm: {image_norm.item():.4f}")
+                    clip_image_emb = clip_image_emb * text_norm / (image_norm + 1e-8)
+                    print(f"[NewbieCLIP]   After unnormalize - Image norm: {torch.norm(clip_image_emb, p=2, dim=-1).item():.4f}")
+
+                if self.jina_mode == "weighted_mix":
+                    clip_text_pooled = self.image_text_alpha * clip_image_emb + (1 - self.image_text_alpha) * clip_text_emb
+                    print(f"[NewbieCLIP]   Weighted mix (alpha={self.image_text_alpha})")
+                    print(f"[NewbieCLIP]   Image emb shape: {clip_image_emb.shape}, Text emb shape: {clip_text_emb.shape}")
+                else:
+                    clip_text_pooled = clip_image_emb
+                    print(f"[NewbieCLIP]   Using image embedding (unnormalize={self.unnormalize_image})")
+
+                print(f"[NewbieCLIP]   Final pooled shape: {clip_text_pooled.shape}, dtype: {clip_text_pooled.dtype}")
+            else:
+                if image is not None:
+                    print(f"[NewbieCLIP] Jina CLIP mode: text_only")
+                text_for_clip = [user_text] if isinstance(user_text, str) else user_text
+                if hasattr(self.clip_model, 'encode_text'):
+                    clip_text_raw = self.clip_model.encode_text(text_for_clip)
+                    if not isinstance(clip_text_raw, torch.Tensor):
+                        clip_text_pooled = torch.from_numpy(clip_text_raw).to(self.device)
+                    else:
+                        clip_text_pooled = clip_text_raw.to(self.device)
+                else:
+                    clip_inputs = self.clip_tokenizer(text_for_clip, return_tensors="pt", padding=True, truncation=True, max_length=8000).to(self.device)
+                    clip_text_pooled = self.clip_model.get_text_features(input_ids=clip_inputs.input_ids)
+                print(f"[NewbieCLIP]   Text pooled shape: {clip_text_pooled.shape}, dtype: {clip_text_pooled.dtype}")
+
             extra_conds = {
                 "cap_feats": cap_feats,
                 "cap_mask": attention_mask,
@@ -995,6 +1042,21 @@ class NewBieCLIPLoader:
                 "enable_jina_weights": ("BOOLEAN", {
                     "default": True,
                     "description": "Enable weight processing for Jina CLIP (requires more memory)"
+                }),
+                "jina_mode": (["text_only", "image_only", "weighted_mix"], {
+                    "default": "text_only",
+                    "description": "Jina CLIP input mode: text_only (default), image_only (pure image), weighted_mix (blend image+text)"
+                }),
+                "image_text_alpha": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                    "description": "Weight for image in weighted_mix mode (0=pure text, 1=pure image)"
+                }),
+                "unnormalize_image": ("BOOLEAN", {
+                    "default": False,
+                    "description": "Unnormalize image embedding to match text norm (enable if trained with get_text_features)"
                 }),
                 "weight_baseline_mode": (["mean", "empty", "compel", "attn_bias", "hybrid"], {
                     "default": "mean",
@@ -1194,6 +1256,9 @@ class NewBieCLIPLoader:
         dtype: str = "bf16",
         cpu_offload: bool = False,
         enable_jina_weights: bool = True,
+        jina_mode: str = "text_only",
+        image_text_alpha: float = 0.5,
+        unnormalize_image: bool = False,
         weight_baseline_mode: str = "mean",
         weight_strength: float = 1.0,
         mask_normalization: bool = True
@@ -1227,6 +1292,9 @@ class NewBieCLIPLoader:
             cpu_offload=cpu_offload,
             processor=processor,
             enable_jina_weights=enable_jina_weights,
+            jina_mode=jina_mode,
+            image_text_alpha=image_text_alpha,
+            unnormalize_image=unnormalize_image,
             weight_baseline_mode=weight_baseline_mode,
             weight_strength=weight_strength,
             mask_normalization=mask_normalization
