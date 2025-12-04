@@ -1,3 +1,6 @@
 /.DS_Store
 /__pycache__/
 /.idea/
+/transport/__pycache__
+/models/__pycache__
+/util/__pycache__
