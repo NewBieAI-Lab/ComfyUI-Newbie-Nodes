@@ -4,7 +4,13 @@ import numpy as np
 from typing import Tuple, Any, Dict, Optional
 import os
 import sys
+import json
+import base64
+import tempfile
 from safetensors.torch import load_file
+from safetensors import safe_open
+
+import folder_paths
 
 try:
     from transformers import AutoModel, AutoTokenizer, AutoConfig, AutoProcessor
@@ -967,18 +973,17 @@ class NewBieCLIP:
 
 
 class NewBieCLIPLoader:
-    
+
     @classmethod
     def INPUT_TYPES(cls):
+        text_encoder_files = folder_paths.get_filename_list("text_encoders")
         return {
             "required": {
-                "gemma_model_path": ("STRING", {
-                    "default": "",
-                    "description": "Path to Gemma3-4B-IT safetensors directory"
+                "gemma_model": (text_encoder_files, {
+                    "tooltip": "Select Gemma3-4B text encoder safetensors file"
                 }),
-                "jina_clip_path": ("STRING", {
-                    "default": "jinaai/jina-clip-v2",
-                    "description": "Path to Jina CLIP model (HuggingFace name or local path)"
+                "jina_clip_model": (text_encoder_files, {
+                    "tooltip": "Select Jina CLIP v2 safetensors file"
                 }),
             },
             "optional": {
@@ -990,170 +995,184 @@ class NewBieCLIPLoader:
                 }),
                 "cpu_offload": ("BOOLEAN", {
                     "default": False,
-                    "description": "Offload models to CPU memory after inference"
+                    "tooltip": "Offload models to CPU memory after inference"
                 }),
                 "enable_jina_weights": ("BOOLEAN", {
                     "default": True,
-                    "description": "Enable weight processing for Jina CLIP (requires more memory)"
+                    "tooltip": "Enable weight processing for Jina CLIP (requires more memory)"
                 }),
                 "weight_baseline_mode": (["mean", "empty", "compel", "attn_bias", "hybrid"], {
                     "default": "mean",
-                    "description": "Weight baseline mode: 'mean' for context-aware, 'empty' for traditional, 'compel' for advanced, 'attn_bias' for attention-based, 'hybrid' for combined approach"
+                    "tooltip": "Weight baseline mode: 'mean' for context-aware, 'empty' for traditional, 'compel' for advanced"
                 }),
                 "weight_strength": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.1,
-                    "description": "Global weight strength multiplier (0=no effect, 1=normal, 2=double strength)"
+                    "tooltip": "Global weight strength multiplier (0=no effect, 1=normal, 2=double strength)"
                 }),
                 "mask_normalization": ("BOOLEAN", {
                     "default": True,
-                    "description": "Normalize attention mask after weight application to maintain distribution"
+                    "tooltip": "Normalize attention mask after weight application to maintain distribution"
                 }),
             }
         }
-    
+
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
     CATEGORY = "loaders"
     TITLE = "NewBie CLIP Loader"
 
-    def load_gemma_model(self, model_path: str, device: str, dtype: torch.dtype):
-        if not TRANSFORMERS_AVAILABLE:
-            raise ImportError("transformers library is required")
-        
-        if not os.path.exists(model_path):
-            try:
-                print(f"Loading Gemma model from HuggingFace: {model_path}")
-                text_encoder = AutoModel.from_pretrained(
-                    model_path,
-                    torch_dtype=dtype,
-                    device_map=device,
-                    trust_remote_code=True
-                )
-                tokenizer = AutoTokenizer.from_pretrained(
-                    model_path,
-                    trust_remote_code=True
-                )
-                tokenizer.padding_side = "right"
-                try:
-                    processor = AutoProcessor.from_pretrained(
-                        model_path,
-                        trust_remote_code=True
-                    )
-                except:
-                    processor = None
-                return text_encoder, tokenizer, processor
-            except Exception as e:
-                raise FileNotFoundError(f"Cannot load Gemma model from {model_path}: {e}")
-        
-        print(f"Loading Gemma model from local path: {model_path}")
-        
-        try:
-            text_encoder = AutoModel.from_pretrained(
-                model_path,
-                torch_dtype=dtype,
-                device_map=device,
-                trust_remote_code=True,
-                local_files_only=True,
-            )
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                local_files_only=True,
-            )
-            tokenizer.padding_side = "right"
-            try:
-                processor = AutoProcessor.from_pretrained(
-                    model_path,
-                    trust_remote_code=True,
-                    local_files_only=True,
-                )
-            except:
-                processor = None
-            return text_encoder, tokenizer, processor
-            
-        except Exception as e:
-            print(f"Direct loading failed: {e}")
-            print("Falling back to manual loading...")
-            
-            config_path = os.path.join(model_path, "config.json")
-            if not os.path.exists(config_path):
-                raise FileNotFoundError(f"config.json not found in {model_path}")
-            
-            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            tokenizer.padding_side = "right"
-            try:
-                processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-            except:
-                processor = None
-            
-            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-            text_encoder = AutoModel.from_config(config, torch_dtype=torch.float32)
-            
-            safetensors_path = os.path.join(model_path, "model.safetensors")
-            if os.path.exists(safetensors_path):
-                state_dict = load_file(safetensors_path, device="cpu")
-            else:
-                import glob
-                shard_files = glob.glob(os.path.join(model_path, "model-*.safetensors"))
-                if shard_files:
-                    state_dict = {}
-                    for shard_file in sorted(shard_files):
-                        shard_dict = load_file(shard_file, device="cpu")
-                        state_dict.update(shard_dict)
-                else:
-                    raise FileNotFoundError(f"No safetensors files found in {model_path}")
-            
-            if any(key.startswith("language_model.model.") for key in state_dict.keys()):
-                state_dict = {
-                    key.replace("language_model.model.", "language_model.") if key.startswith("language_model.model.") else key: value
-                    for key, value in state_dict.items()
-                }
-            
-            missing_keys, unexpected_keys = text_encoder.load_state_dict(state_dict, strict=False)
-            if missing_keys:
-                print(f"Missing keys: {len(missing_keys)}")
-            if unexpected_keys:
-                print(f"Unexpected keys: {len(unexpected_keys)}")
-            
-            text_encoder = text_encoder.to(device=device, dtype=dtype)
-            
-            return text_encoder, tokenizer, processor
+    def _load_tokenizer_from_metadata(self, metadata: dict, model_type: str):
+        """Load tokenizer from base64-encoded files in metadata."""
+        tokenizer_files_json = metadata.get("tokenizer_files")
+        if not tokenizer_files_json:
+            raise ValueError(f"No tokenizer_files found in metadata")
 
-    def load_jina_clip(self, model_path: str, device: str, dtype: torch.dtype, enable_jina_weights: bool = True):
+        tokenizer_files = json.loads(tokenizer_files_json)
+        print(f"[NewBieCLIP] Restoring tokenizer from {len(tokenizer_files)} files...")
+
+        # Create temp dir and restore tokenizer files
+        tmp_dir = tempfile.mkdtemp(prefix="newbie_tokenizer_")
+        for filename, content_b64 in tokenizer_files.items():
+            filepath = os.path.join(tmp_dir, filename)
+            with open(filepath, 'wb') as f:
+                f.write(base64.b64decode(content_b64))
+
+        # Load tokenizer from temp dir
+        tokenizer = AutoTokenizer.from_pretrained(tmp_dir, trust_remote_code=True)
+
+        # Cleanup temp dir
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        return tokenizer
+
+    def load_gemma_from_safetensors(self, safetensors_path: str, device: str, dtype: torch.dtype):
+        """Load Gemma model from a single safetensors file with embedded metadata."""
         if not TRANSFORMERS_AVAILABLE:
             raise ImportError("transformers library is required")
 
-        print(f"Loading Jina CLIP model: {model_path}")
-        print(f"Device: {device}, Dtype: {dtype}")
+        print(f"[NewBieCLIP] Loading Gemma from safetensors: {safetensors_path}")
 
-        try:
-            # Standard loading with trust_remote_code
-            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-            config.use_flash_attn = False
-            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            clip_model = AutoModel.from_pretrained(
-                model_path,
-                config=config,
-                torch_dtype=dtype,
-                device_map=device,
-                trust_remote_code=True
-            )
+        # Load metadata from safetensors
+        with safe_open(safetensors_path, framework="pt") as f:
+            metadata = f.metadata()
 
-            # Add hook to capture hidden states if weight processing is enabled
-            if enable_jina_weights and hasattr(clip_model, 'text_model'):
-                print(f"[NewbieCLIP] Installing hook to capture hidden states")
-                self._install_hidden_state_hook(clip_model, enable_jina_weights)
+        if not metadata:
+            raise ValueError(f"No metadata found in {safetensors_path}")
 
-            return clip_model, tokenizer
+        model_type = metadata.get("model_type", "gemma3_text_encoder")
+        print(f"[NewBieCLIP] Model type: {model_type}")
 
-        except Exception as e:
-            print(f"Error in load_jina_clip: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
+        # Load tokenizer from embedded data (offline)
+        print(f"[NewBieCLIP] Loading tokenizer from embedded data...")
+        tokenizer = self._load_tokenizer_from_metadata(metadata, model_type)
+        tokenizer.padding_side = "right"
+
+        # Load weights from safetensors directly to GPU first
+        print(f"[NewBieCLIP] Loading weights to {device}...")
+        state_dict = load_file(safetensors_path, device=device)
+
+        print(f"[NewBieCLIP] Loaded {len(state_dict)} tensors")
+
+        # Load config from original repo (most reliable)
+        print(f"[NewBieCLIP] Loading config and creating model on {device}...")
+        original_repo = metadata.get("original_repo", "google/gemma-3-4b-it")
+        print(f"[NewBieCLIP] Using config from: {original_repo}")
+        config = AutoConfig.from_pretrained(original_repo, trust_remote_code=True)
+
+        # Create model with empty weights, then load from state_dict
+        with torch.device(device):
+            text_encoder = AutoModel.from_config(config)
+
+        # Load state dict (already on GPU)
+        missing_keys, unexpected_keys = text_encoder.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            print(f"[NewBieCLIP] Warning: {len(missing_keys)} missing keys")
+        if unexpected_keys:
+            print(f"[NewBieCLIP] Warning: {len(unexpected_keys)} unexpected keys")
+
+        # Also load non-persistent buffers if they exist in safetensors
+        # These are not loaded by load_state_dict because they're registered with persistent=False
+        buffer_loaded = 0
+        for name, buf in text_encoder.named_buffers():
+            if name in state_dict:
+                src = state_dict[name]
+                # Handle dtype mismatch (safetensors might be bf16, buffer might be fp32)
+                if src.dtype != buf.dtype:
+                    src = src.to(buf.dtype)
+                buf.copy_(src)
+                buffer_loaded += 1
+        if buffer_loaded > 0:
+            print(f"[NewBieCLIP] Loaded {buffer_loaded} buffers")
+
+        text_encoder = text_encoder.to(dtype=dtype)
+        text_encoder.eval()
+
+        del state_dict
+        torch.cuda.empty_cache()
+
+        print(f"[NewBieCLIP] Gemma loaded successfully!")
+        return text_encoder, tokenizer, None  # processor is None for text-only
+
+    def load_jina_from_safetensors(self, safetensors_path: str, device: str, dtype: torch.dtype, enable_jina_weights: bool = True):
+        """Load Jina CLIP model from a single safetensors file with embedded metadata."""
+        if not TRANSFORMERS_AVAILABLE:
+            raise ImportError("transformers library is required")
+
+        print(f"[NewBieCLIP] Loading Jina CLIP from safetensors: {safetensors_path}")
+
+        # Load metadata from safetensors
+        with safe_open(safetensors_path, framework="pt") as f:
+            metadata = f.metadata()
+
+        if not metadata:
+            raise ValueError(f"No metadata found in {safetensors_path}")
+
+        model_type = metadata.get("model_type", "jina_clip_v2")
+        original_repo = metadata.get("original_repo", "jinaai/jina-clip-v2")
+        print(f"[NewBieCLIP] Model type: {model_type}")
+
+        # Load tokenizer from embedded data (offline)
+        print(f"[NewBieCLIP] Loading tokenizer from embedded data...")
+        tokenizer = self._load_tokenizer_from_metadata(metadata, model_type)
+
+        # Load weights from safetensors directly to GPU first
+        print(f"[NewBieCLIP] Loading weights to {device}...")
+        state_dict = load_file(safetensors_path, device=device)
+        print(f"[NewBieCLIP] Loaded {len(state_dict)} tensors")
+
+        # Load config and create model - Jina needs trust_remote_code for custom model class
+        print(f"[NewBieCLIP] Loading config and creating model on {device}...")
+        # For Jina CLIP, we still need the original repo for the custom model architecture
+        config = AutoConfig.from_pretrained(original_repo, trust_remote_code=True)
+        config.use_flash_attn = False
+
+        with torch.device(device):
+            clip_model = AutoModel.from_config(config, trust_remote_code=True)
+
+        # Load state dict (already on GPU)
+        missing_keys, unexpected_keys = clip_model.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            print(f"[NewBieCLIP] Warning: {len(missing_keys)} missing keys")
+        if unexpected_keys:
+            print(f"[NewBieCLIP] Warning: {len(unexpected_keys)} unexpected keys")
+
+        clip_model = clip_model.to(dtype=dtype)
+        clip_model.eval()
+
+        del state_dict
+        torch.cuda.empty_cache()
+
+        # Install hook for weight processing
+        if enable_jina_weights and hasattr(clip_model, 'text_model'):
+            print(f"[NewBieCLIP] Installing hook to capture hidden states")
+            self._install_hidden_state_hook(clip_model, enable_jina_weights)
+
+        print(f"[NewBieCLIP] Jina CLIP loaded successfully!")
+        return clip_model, tokenizer
 
     def _install_hidden_state_hook(self, clip_model, enable_jina_weights=True):
         """Install forward hook to capture hidden states from text_model"""
@@ -1165,31 +1184,26 @@ class NewBieCLIPLoader:
         def hook_fn(module, input, output):
             if hasattr(output, 'last_hidden_state'):
                 clip_model._last_hidden_states = output.last_hidden_state
-                print(f"[NewbieCLIP] Hook: Captured hidden states shape={output.last_hidden_state.shape}")
             elif isinstance(output, tuple):
                 for out in output:
                     if isinstance(out, torch.Tensor) and out.dim() == 3:
                         clip_model._last_hidden_states = out
-                        print(f"[NewbieCLIP] Hook: Captured hidden states from tuple, shape={out.shape}")
                         break
 
         if hasattr(clip_model.text_model, 'transformer'):
             handle = clip_model.text_model.transformer.register_forward_hook(hook_fn)
             clip_model._hook_handle = handle
-            print(f"[NewbieCLIP] Hook registered on text_model.transformer")
         elif hasattr(clip_model.text_model, 'encoder'):
             handle = clip_model.text_model.encoder.register_forward_hook(hook_fn)
             clip_model._hook_handle = handle
-            print(f"[NewbieCLIP] Hook registered on text_model.encoder")
         else:
             handle = clip_model.text_model.register_forward_hook(hook_fn)
             clip_model._hook_handle = handle
-            print(f"[NewbieCLIP] Hook registered on text_model directly")
 
     def load_clip(
         self,
-        gemma_model_path: str,
-        jina_clip_path: str,
+        gemma_model: str,
+        jina_clip_model: str,
         device: str = "cuda",
         dtype: str = "bf16",
         cpu_offload: bool = False,
@@ -1204,20 +1218,25 @@ class NewBieCLIPLoader:
             "fp32": torch.float32
         }
         torch_dtype = dtype_map[dtype]
-        
-        print(f"Loading NewBie CLIP models...")
-        print(f"Gemma path: {gemma_model_path}")
-        print(f"Jina CLIP path: {jina_clip_path}")
-        print(f"Device: {device}, Dtype: {dtype}")
-        
-        text_encoder, tokenizer, processor = self.load_gemma_model(
-            gemma_model_path, device, torch_dtype
+
+        # Get full paths from folder_paths
+        gemma_path = folder_paths.get_full_path_or_raise("text_encoders", gemma_model)
+        jina_path = folder_paths.get_full_path_or_raise("text_encoders", jina_clip_model)
+
+        print(f"[NewBieCLIP] Loading models...")
+        print(f"[NewBieCLIP] Gemma: {gemma_path}")
+        print(f"[NewBieCLIP] Jina CLIP: {jina_path}")
+        print(f"[NewBieCLIP] Device: {device}, Dtype: {dtype}")
+
+        # Load models from safetensors
+        text_encoder, tokenizer, processor = self.load_gemma_from_safetensors(
+            gemma_path, device, torch_dtype
         )
-        
-        clip_model, clip_tokenizer = self.load_jina_clip(
-            jina_clip_path, device, torch_dtype, enable_jina_weights
+
+        clip_model, clip_tokenizer = self.load_jina_from_safetensors(
+            jina_path, device, torch_dtype, enable_jina_weights
         )
-        
+
         newbie_clip = NewBieCLIP(
             text_encoder=text_encoder,
             tokenizer=tokenizer,
@@ -1231,7 +1250,7 @@ class NewBieCLIPLoader:
             weight_strength=weight_strength,
             mask_normalization=mask_normalization
         )
-        
+
         return (newbie_clip,)
 
 
