@@ -1,0 +1,174 @@
+{
+  "id": "4f407aaa-5262-4565-8568-97ec6a346ed6",
+  "revision": 0,
+  "last_node_id": 3,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 3,
+      "type": "NewBieCLIPLoader",
+      "pos": [
+        800,
+        -370
+      ],
+      "size": [
+        300,
+        250
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "NewBieAI-Lab/ComfyUI-Newbie-Nodes",
+        "ver": "ee84079431b309b32a6b3081cb987aadc8b5e455",
+        "widget_ue_connectable": {},
+        "Node name for S&R": "NewBieCLIPLoader"
+      },
+      "widgets_values": [
+        "google/gemma-3-4b-it",
+        "jinaai/jina-clip-v2",
+        "cuda",
+        "bf16",
+        false,
+        true,
+        "compel",
+        1,
+        true
+      ]
+    },
+    {
+      "id": 1,
+      "type": "ShowText|pysssss",
+      "pos": [
+        1650,
+        -370
+      ],
+      "size": [
+        610.1914605309489,
+        482.9116361172645
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "shape": 6,
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-custom-scripts",
+        "ver": "aac13aa7ce35b07d43633c3bbe654a38c00d74f5",
+        "widget_ue_connectable": {},
+        "Node name for S&R": "ShowText|pysssss"
+      }
+    },
+    {
+      "id": 2,
+      "type": "NewBieGemmaChat",
+      "pos": [
+        1100,
+        -370
+      ],
+      "size": [
+        551.7327034621558,
+        585.3073540622677
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "response",
+          "type": "STRING",
+          "links": [
+            1
+          ]
+        },
+        {
+          "name": "full_conversation",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "NewBieAI-Lab/ComfyUI-Newbie-Nodes",
+        "ver": "ed73daba8e17d4b7a57d9fd6c467a90ba12babc3",
+        "widget_ue_connectable": {},
+        "Node name for S&R": "NewBieGemmaChat"
+      },
+      "widgets_values": [
+        "hatsune miku, blue hair, blue eyes, white skirt, black crop top, smile, holding a towel, 1girl, solo, wide hips, narrow waist, medium breasts, by mika pikazo, anime style, beach, summer, sand, soft lighting, soft lighting, extra: (((best_anatomy, best_visible_fingers, best_visible_hands, masterpiece, best quality, newest, absurdres, highres, ultra-detailed, high-definition, 4k, 8k, smooth, vibrant colors, dynamic range, year 2025, year 2024, year 2023, year 2022, year 2021, aesthetic, very aesthetic, ultra-high resolution, 32K UHD)))",
+        "You are a Danbooru-to-XML prompt converter for AI image generation.\n\nINPUT: Comma-separated Danbooru tags\nOUTPUT: XML prompt in the exact format below\n\nSTRICT RULES:\n1. PRESERVE tags exactly as given - do not modify, translate, or rephrase\n2. ESCAPE parentheses with backslash: ( becomes \\( and ) becomes \\)\n3. Character names go in <n> tags exactly as written (e.g., hatsune_miku, rem_\\(re:zero\\))\n4. If no character name is specified, keep <n></n> empty but do not delete it\n5. For single character, omit <character_2> entirely\n6. Artist tags (artist:name or by_artist) go in <artists> as: artist:exact_name\n7. Delete <clothing> tag entirely if no clothing specified\n8. The <caption> section uses natural language WITHOUT underscores - convert blue_hair to \"blue hair\" etc.\n\nCLASSIFICATION GUIDE:\n- Gender: 1girl, 1boy, 2girls, multiple_boys, etc.\n- Appearance: hair color, eye color, body features (blue_hair, red_eyes, long_hair, etc.)\n- Clothing: outfit tags (dress, school_uniform, hat, etc.)\n- Expression: emotions (smile, blush, crying, angry, etc.)\n- Action: poses/activities (sitting, standing, holding, looking_at_viewer, etc.)\n- Background: setting tags (outdoors, indoors, classroom, forest, etc.)\n- Atmosphere: mood tags (dark, bright, romantic, etc.)\n\nXML FORMAT:\n<character_1>\n  <n></n>\n  <gender></gender>\n  <appearance></appearance>\n  <clothing></clothing>\n  <expression></expression>\n  <action></action>\n  <interaction></interaction>\n  <position></position>\n</character_1>\n\n<general_tags>\n  <count></count>\n  <artists></artists>\n  <style>anime style</style>\n  <background></background>\n  <environment></environment>\n  <perspective></perspective>\n  <atmosphere></atmosphere>\n  <lighting></lighting>\n  <resolution>max_high_resolution</resolution>\n  <quality>very aesthetic, masterpiece, no text</quality>\n  <objects></objects>\n  <other></other>\n</general_tags>\n\n<caption>Natural language description of the scene with lighting/shadow details. Escape parentheses with backslash here too.</caption>",
+        0.7,
+        512,
+        0.9,
+        50,
+        "",
+        true
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      2,
+      0,
+      1,
+      0,
+      "STRING"
+    ],
+    [
+      2,
+      3,
+      0,
+      2,
+      0,
+      "CLIP"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ue_links": [],
+    "ds": {
+      "scale": 1.5535220464768975,
+      "offset": [
+        -658.9093992173748,
+        490.8051432134908
+      ]
+    },
+    "frontendVersion": "1.28.8",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}
