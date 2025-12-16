@@ -558,6 +558,12 @@ class NewBieCLIP:
             "clip_text_pooled": clip_pooled_final,
         }
 
+        # Final safety check: ensure models are offloaded if cpu_offload is enabled
+        if self.cpu_offload:
+            self.text_encoder = self.text_encoder.to("cpu")
+            self.clip_model = self.clip_model.to("cpu")
+            torch.cuda.empty_cache()
+
         return [[final_gemma, extra_conds]]
     
     def tokenize(self, text):
