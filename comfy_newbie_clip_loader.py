@@ -16,7 +16,7 @@ except ImportError:
 
 class NewBieCLIP:
 
-    def __init__(self, text_encoder, tokenizer, clip_model, clip_tokenizer, device="cuda", cpu_offload=False, processor=None, enable_jina_weights=True, weight_baseline_mode="mean", weight_strength=1.0, mask_normalization=True):
+    def __init__(self, text_encoder, tokenizer, clip_model, clip_tokenizer, device="cuda", cpu_offload=False, processor=None, enable_jina_weights=True, weight_baseline_mode="compel", weight_strength=1.0, mask_normalization=True):
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
         self.clip_model = clip_model
@@ -996,9 +996,9 @@ class NewBieCLIPLoader:
                     "default": True,
                     "description": "Enable weight processing for Jina CLIP (requires more memory)"
                 }),
-                "weight_baseline_mode": (["mean", "empty", "compel", "attn_bias", "hybrid"], {
-                    "default": "mean",
-                    "description": "Weight baseline mode: 'mean' for context-aware, 'empty' for traditional, 'compel' for advanced, 'attn_bias' for attention-based, 'hybrid' for combined approach"
+                "weight_baseline_mode": (["compel", "mean", "empty", "attn_bias", "hybrid"], {
+                    "default": "compel",
+                    "description": "Weight baseline mode: 'compel' for advanced, 'mean' for context-aware, 'empty' for traditional, 'attn_bias' for attention-based, 'hybrid' for combined approach"
                 }),
                 "weight_strength": ("FLOAT", {
                     "default": 1.0,

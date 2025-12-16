@@ -110,9 +110,11 @@ class NewBieBaseModel(torch.nn.Module):
         dtype = self.get_dtype()
         if self.manual_cast_dtype is not None:
             dtype = self.manual_cast_dtype
+
+        device = xc.device
         xc = xc.to(dtype)
 
-        t_val = (1.0 - sigma).float()
+        t_val = (1.0 - sigma).float().to(device)
 
         cap_feats = kwargs.get('cap_feats', c_crossattn)
         cap_mask = kwargs.get('cap_mask', kwargs.get('attention_mask'))
@@ -120,15 +122,17 @@ class NewBieBaseModel(torch.nn.Module):
         clip_img_pooled = kwargs.get('clip_img_pooled')
 
         if cap_feats is not None:
-            cap_feats = cap_feats.to(dtype)
+            cap_feats = cap_feats.to(device=device, dtype=dtype)
         if cap_mask is None and cap_feats is not None:
-            cap_mask = torch.ones(cap_feats.shape[:2], dtype=torch.long, device=cap_feats.device)
+            cap_mask = torch.ones(cap_feats.shape[:2], dtype=torch.long, device=device)
+        elif cap_mask is not None:
+            cap_mask = cap_mask.to(device)
 
         model_kwargs = {}
         if clip_text_pooled is not None:
-            model_kwargs['clip_text_pooled'] = clip_text_pooled.to(dtype)
+            model_kwargs['clip_text_pooled'] = clip_text_pooled.to(device=device, dtype=dtype)
         if clip_img_pooled is not None:
-            model_kwargs['clip_img_pooled'] = clip_img_pooled.to(dtype)
+            model_kwargs['clip_img_pooled'] = clip_img_pooled.to(device=device, dtype=dtype)
 
         model_output = self.diffusion_model(xc, t_val, cap_feats, cap_mask, **model_kwargs).float()
         model_output = -model_output
