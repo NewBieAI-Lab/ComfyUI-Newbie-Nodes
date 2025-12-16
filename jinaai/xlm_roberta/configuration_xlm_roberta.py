@@ -37,7 +37,7 @@ class XLMRobertaFlashConfig(PretrainedConfig):
         lora_alpha: int = 1,
         lora_main_params_trainable: bool = False,
         load_trained_adapters: bool = False,
-        use_flash_attn: bool = True,
+        use_flash_attn: bool = False,  # Disabled - using PyTorch native attention
         torch_dtype: Optional[Union[str, torch.dtype]] = None,
         emb_pooler: Optional[str] = None,
         matryoshka_dimensions: Optional[List[int]] = None,

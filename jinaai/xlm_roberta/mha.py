@@ -1,6 +1,5 @@
 # This implementation was adapted from https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/modules/mha.py
-# Commit id: 6bbc532388e61185a92e2a563126739967b4c8c5
-# Rotary varlen support from https://github.com/Dao-AILab/flash-attention/pull/556
+# Modified to remove flash_attn dependency and use pure PyTorch implementation
 
 # Copyright (c) 2023, Tri Dao.
 
@@ -10,23 +9,6 @@ from functools import partial
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
-
-try:
-    from flash_attn import (flash_attn_kvpacked_func,
-                            flash_attn_qkvpacked_func,
-                            flash_attn_varlen_kvpacked_func,
-                            flash_attn_varlen_qkvpacked_func,
-                            flash_attn_with_kvcache)
-except ImportError:
-    flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpacked_func = None, None
-    flash_attn_qkvpacked_func, flash_attn_kvpacked_func = None, None
-    flash_attn_with_kvcache = None
-
-try:
-    from flash_attn.ops.fused_dense import (ColumnParallelLinear, FusedDense,
-                                            RowParallelLinear)
-except ImportError:
-    FusedDense, ColumnParallelLinear, RowParallelLinear = None, None, None
 
 from .rotary import RotaryEmbedding
 
@@ -50,187 +32,6 @@ def get_alibi_slopes(nheads):
         )
 
 
-class FlashSelfAttention(nn.Module):
-    """Implement the scaled dot product attention with softmax.
-    Arguments
-    ---------
-        softmax_scale: The temperature to use for the softmax attention.
-                      (default: 1/sqrt(d_keys) where d_keys is computed at
-                      runtime)
-        attention_dropout: The dropout rate to apply to the attention
-                           (default: 0.0)
-    """
-
-    def __init__(
-        self,
-        causal=False,
-        softmax_scale=None,
-        attention_dropout=0.0,
-        window_size=(-1, -1),
-        alibi_slopes=None,
-        deterministic=False,
-    ):
-        super().__init__()
-        assert (
-            flash_attn_varlen_qkvpacked_func is not None
-        ), "FlashAttention is not installed"
-        assert flash_attn_qkvpacked_func is not None, "FlashAttention is not installed"
-        self.causal = causal
-        self.softmax_scale = softmax_scale
-        self.drop = nn.Dropout(attention_dropout)
-        self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
-        self.window_size = window_size
-        self.deterministic = deterministic
-
-    def forward(self, qkv, causal=None, cu_seqlens=None, max_seqlen=None):
-        """Implements the multihead softmax attention.
-        Arguments
-        ---------
-            qkv: The tensor containing the query, key, and value.
-                If cu_seqlens is None and max_seqlen is None, then qkv has shape (B, S, 3, H, D).
-                If cu_seqlens is not None and max_seqlen is not None, then qkv has shape
-                (total, 3, H, D), where total is the sum of the sequence lengths in the batch.
-            causal: if passed, will override self.causal
-            cu_seqlens: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
-                of the sequences in the batch, used to index into qkv.
-            max_seqlen: int. Maximum sequence length in the batch.
-        Returns:
-        --------
-            out: (total, H, D) if cu_seqlens is not None and max_seqlen is not None,
-                else (B, S, H, D).
-        """
-        assert qkv.dtype in [torch.float16, torch.bfloat16]
-        assert qkv.is_cuda
-        causal = self.causal if causal is None else causal
-        unpadded = cu_seqlens is not None
-        if self.alibi_slopes is not None:
-            self.alibi_slopes = self.alibi_slopes.to(torch.float32)
-        if unpadded:
-            assert cu_seqlens.dtype == torch.int32
-            assert max_seqlen is not None
-            assert isinstance(max_seqlen, int)
-            return flash_attn_varlen_qkvpacked_func(
-                qkv,
-                cu_seqlens,
-                max_seqlen,
-                self.drop.p if self.training else 0.0,
-                softmax_scale=self.softmax_scale,
-                causal=causal,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.window_size,
-                deterministic=self.deterministic,
-            )
-        else:
-            return flash_attn_qkvpacked_func(
-                qkv,
-                self.drop.p if self.training else 0.0,
-                softmax_scale=self.softmax_scale,
-                causal=causal,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.window_size,
-                deterministic=self.deterministic,
-            )
-
-
-class FlashCrossAttention(nn.Module):
-    """Implement the scaled dot product attention with softmax.
-    Arguments
-    ---------
-        softmax_scale: The temperature to use for the softmax attention.
-                      (default: 1/sqrt(d_keys) where d_keys is computed at
-                      runtime)
-        attention_dropout: The dropout rate to apply to the attention
-                           (default: 0.0)
-    """
-
-    def __init__(
-        self,
-        causal=False,
-        softmax_scale=None,
-        attention_dropout=0.0,
-        alibi_slopes=None,
-        window_size=(-1, -1),
-        deterministic=False,
-    ):
-        super().__init__()
-        assert (
-            flash_attn_varlen_kvpacked_func is not None
-        ), "FlashAttention is not installed"
-        assert flash_attn_kvpacked_func is not None, "FlashAttention is not installed"
-        self.causal = causal
-        self.softmax_scale = softmax_scale
-        self.drop = nn.Dropout(attention_dropout)
-        self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
-        self.window_size = window_size
-        self.deterministic = deterministic
-
-    def forward(
-        self,
-        q,
-        kv,
-        causal=None,
-        cu_seqlens=None,
-        max_seqlen=None,
-        cu_seqlens_k=None,
-        max_seqlen_k=None,
-    ):
-        """Implements the multihead softmax attention.
-        Arguments
-        ---------
-            q: The tensor containing the query. (B, Sq, H, D)
-            kv: The tensor containing the key and value. (B, Sk, 2, H_k, D)
-            causal: if passed, will override self.causal
-            cu_seqlens: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
-                of the sequences in the batch, used to index into q.
-            max_seqlen: int. Maximum sequence length in the batch of q.
-            cu_seqlens_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
-                of the sequences in the batch, used to index into kv.
-            max_seqlen_k: int. Maximum sequence length in the batch of k and v.
-        """
-        assert q.dtype in [torch.float16, torch.bfloat16]
-        assert q.is_cuda and kv.is_cuda
-        causal = self.causal if causal is None else causal
-        unpadded = cu_seqlens is not None
-        if self.alibi_slopes is not None:
-            self.alibi_slopes = self.alibi_slopes.to(torch.float32)
-        if unpadded:
-            assert cu_seqlens.dtype == torch.int32
-            assert max_seqlen is not None
-            assert isinstance(max_seqlen, int)
-            assert cu_seqlens_k is not None
-            assert cu_seqlens_k.dtype == torch.int32
-            assert max_seqlen_k is not None
-            assert isinstance(max_seqlen, int)
-            return flash_attn_varlen_kvpacked_func(
-                q,
-                kv,
-                cu_seqlens,
-                cu_seqlens_k,
-                max_seqlen,
-                max_seqlen_k,
-                self.drop.p if self.training else 0.0,
-                softmax_scale=self.softmax_scale,
-                causal=causal,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.window_size,
-                deterministic=self.deterministic,
-            )
-        else:
-            batch_size, seqlen_q = q.shape[0], q.shape[1]
-            seqlen_k = kv.shape[1]
-            assert kv.shape[0] == batch_size and kv.shape[4] == q.shape[3]
-            return flash_attn_kvpacked_func(
-                q,
-                kv,
-                self.drop.p if self.training else 0.0,
-                causal=causal,
-                softmax_scale=self.softmax_scale,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.window_size,
-                deterministic=self.deterministic,
-            )
-
-
 class SelfAttention(nn.Module):
     """Implement the scaled dot product attention with softmax.
     Arguments
@@ -248,7 +49,7 @@ class SelfAttention(nn.Module):
         self.softmax_scale = softmax_scale
         self.drop = nn.Dropout(attention_dropout)
 
-    def forward(self, qkv, causal=None, key_padding_mask=None):
+    def forward(self, qkv, causal=None, key_padding_mask=None, **kwargs):
         """Implements the multihead softmax attention.
         Arguments
         ---------
@@ -300,7 +101,7 @@ class CrossAttention(nn.Module):
         self.softmax_scale = softmax_scale
         self.drop = nn.Dropout(attention_dropout)
 
-    def forward(self, q, kv, causal=None, key_padding_mask=None):
+    def forward(self, q, kv, causal=None, key_padding_mask=None, **kwargs):
         """Implements the multihead softmax attention.
         Arguments
         ---------
@@ -407,7 +208,7 @@ class MHA(nn.Module):
         use_alibi=False,
         window_size=(-1, -1),
         fused_bias_fc=False,
-        use_flash_attn=False,
+        use_flash_attn=False,  # Ignored - always use PyTorch implementation
         return_residual=False,
         checkpointing=False,
         device=None,
@@ -427,18 +228,20 @@ class MHA(nn.Module):
         self.layer_idx = layer_idx
         self.dwconv = dwconv
         self.rotary_emb_dim = rotary_emb_dim
-        self.use_flash_attn = use_flash_attn
+        self.use_flash_attn = False  # Always use PyTorch implementation
         self.return_residual = return_residual
         self.checkpointing = checkpointing
+
+        # ALiBi is not supported without flash_attn, ignore it
         if use_alibi:
-            assert use_flash_attn, "ALiBi code path requires flash_attn"
-            alibi_slopes = torch.tensor(get_alibi_slopes(num_heads), device=device)
-        else:
-            alibi_slopes = None
+            import warnings
+            warnings.warn("ALiBi requires flash_attn which is disabled, ignoring ALiBi")
+        alibi_slopes = None
+
+        # Window attention is not supported without flash_attn, ignore it
         if window_size != (-1, -1):
-            assert (
-                use_flash_attn
-            ), "Local (sliding window) attention code path requires flash_attn"
+            import warnings
+            warnings.warn("Window attention requires flash_attn which is disabled, ignoring window_size")
 
         self.num_heads = num_heads
         self.num_heads_kv = num_heads_kv if num_heads_kv is not None else num_heads
@@ -463,33 +266,18 @@ class MHA(nn.Module):
                 scale_base=rotary_emb_scale_base,
                 interleaved=rotary_emb_interleaved,
                 device=device,
-                use_flash_attn=use_flash_attn,
+                use_flash_attn=False,  # Always use PyTorch implementation
             )
 
-        if fused_bias_fc and FusedDense is None:
-            raise ImportError("fused_dense is not installed")
-
-        linear_cls = nn.Linear if not fused_bias_fc else FusedDense
-        linear_resid_cls = (
-            LinearResidual
-            if not fused_bias_fc
-            else partial(FusedDense, return_residual=True)
-        )
+        # fused_bias_fc requires flash_attn, always use standard Linear
+        linear_cls = nn.Linear
+        linear_resid_cls = LinearResidual
         wqkv_cls = linear_cls if not self.return_residual else linear_resid_cls
-        inner_attn_cls = (
-            partial(
-                FlashSelfAttention, alibi_slopes=alibi_slopes, window_size=window_size
-            )
-            if use_flash_attn
-            else SelfAttention
-        )
-        inner_cross_attn_cls = (
-            partial(
-                FlashCrossAttention, alibi_slopes=alibi_slopes, window_size=window_size
-            )
-            if use_flash_attn
-            else CrossAttention
-        )
+
+        # Always use standard attention (no flash attention)
+        inner_attn_cls = SelfAttention
+        inner_cross_attn_cls = CrossAttention
+
         if not self.cross_attn:
             self.Wqkv = wqkv_cls(
                 embed_dim, qkv_dim, bias=qkv_proj_bias, **factory_kwargs
@@ -544,81 +332,10 @@ class MHA(nn.Module):
         ), "Generation requires layer_idx in the constructor"
         return _update_kv_cache(kv, inference_params, self.layer_idx)
 
-    def _apply_rotary_update_kvcache_attention(self, q, kv, inference_params):
-        """
-        Fast path that combine 3 steps: apply rotary to Q and K, update kv cache, and apply attention.
-        q: (batch_size, seqlen_q, nheads, head_dim)
-        kv: (batch_size, seqlen_k, 2, nheads_kv, head_dim)
-        """
-        assert inference_params is not None and inference_params.seqlen_offset > 0
-        assert self.use_flash_attn
-        if self.rotary_emb_dim > 0:
-            assert self.rotary_emb.scale is None, "This code path does not support xPos"
-            self.rotary_emb._update_cos_sin_cache(
-                inference_params.max_seqlen, device=q.device, dtype=q.dtype
-            )
-            rotary_cos, rotary_sin = (
-                self.rotary_emb._cos_cached,
-                self.rotary_emb._sin_cached,
-            )
-        else:
-            rotary_cos, rotary_sin = None, None
-        batch = q.shape[0]
-        kv_cache = inference_params.key_value_memory_dict[self.layer_idx][:batch]
-        cache_seqlens = (
-            inference_params.lengths_per_sample[:batch]
-            if inference_params.lengths_per_sample is not None
-            else inference_params.seqlen_offset
-        )
-        alibi_slopes = getattr(self.inner_cross_attn, "alibi_slopes", None)
-        context = flash_attn_with_kvcache(
-            q,
-            kv_cache[:, :, 0],
-            kv_cache[:, :, 1],
-            kv[:, :, 0],
-            kv[:, :, 1],
-            rotary_cos=rotary_cos,
-            rotary_sin=rotary_sin,
-            cache_seqlens=cache_seqlens,
-            softmax_scale=self.inner_cross_attn.softmax_scale,
-            causal=self.inner_cross_attn.causal,
-            rotary_interleaved=(
-                self.rotary_emb.interleaved if self.rotary_emb_dim > 0 else False
-            ),
-            alibi_slopes=alibi_slopes,
-        )
-        return context
-
     def _update_kvcache_attention(self, q, kv, inference_params):
         """Write kv to inference_params, then do attention"""
-        if (
-            inference_params.seqlen_offset == 0
-            or flash_attn_with_kvcache is None
-            or not self.use_flash_attn
-        ):
-            # TODO: this only uses seqlen_offset and not lengths_per_sample.
-            kv = self._update_kv_cache(kv, inference_params)
-            return self.inner_cross_attn(q, kv)
-        else:
-            batch = q.shape[0]
-            kv_cache = inference_params.key_value_memory_dict[self.layer_idx][:batch]
-            cache_seqlens = (
-                inference_params.lengths_per_sample[:batch]
-                if inference_params.lengths_per_sample is not None
-                else inference_params.seqlen_offset
-            )
-            alibi_slopes = getattr(self.inner_cross_attn, "alibi_slopes", None)
-            return flash_attn_with_kvcache(
-                q,
-                kv_cache[:, :, 0],
-                kv_cache[:, :, 1],
-                kv[:, :, 0],
-                kv[:, :, 1],
-                cache_seqlens=cache_seqlens,
-                softmax_scale=self.inner_cross_attn.softmax_scale,
-                causal=self.inner_cross_attn.causal,
-                alibi_slopes=alibi_slopes,
-            )
+        kv = self._update_kv_cache(kv, inference_params)
+        return self.inner_cross_attn(q, kv)
 
     def forward(
         self,
@@ -650,25 +367,19 @@ class MHA(nn.Module):
             inference_params: for generation. Adapted from Megatron-LM (and Apex)
             https://github.com/NVIDIA/apex/blob/3ff1a10f72ec07067c4e44759442329804ac5162/apex/transformer/testing/standalone_transformer_lm.py#L470
         """
+        # cu_seqlens/max_seqlen are for flash_attn varlen, convert to standard format
         if cu_seqlens is not None:
-            assert max_seqlen is not None
-            assert key_padding_mask is None
-            assert self.use_flash_attn
-            assert not self.dwconv
-        if key_padding_mask is not None:
-            assert cu_seqlens is None
-            assert max_seqlen is None
-            assert not self.use_flash_attn
+            # Unpack variable length sequences - this is a simplified fallback
+            # For inference without flash_attn, we need padded input
+            import warnings
+            warnings.warn("cu_seqlens requires flash_attn, falling back to padded attention")
+
         if inference_params is not None:
             assert key_padding_mask is None
-            assert cu_seqlens is None and max_seqlen is None
             assert not self.dwconv
 
-        kwargs = (
-            {"cu_seqlens": cu_seqlens, "max_seqlen": max_seqlen, **kwargs}
-            if self.use_flash_attn
-            else {"key_padding_mask": key_padding_mask, **kwargs}
-        )
+        kwargs = {"key_padding_mask": key_padding_mask, **kwargs}
+
         seqlen_offset = (
             0
             if inference_params is None
@@ -722,32 +433,23 @@ class MHA(nn.Module):
             qkv = rearrange(
                 qkv, "... (three h d) -> ... three h d", three=3, d=self.head_dim
             )
-            if (
-                inference_params is None
-                or inference_params.seqlen_offset == 0
-                or (self.rotary_emb_dim == 0 or self.rotary_emb_dim % 16 != 0)
-                or not self.use_flash_attn
-            ):
-                if self.rotary_emb_dim > 0:
-                    qkv = self.rotary_emb(
-                        qkv,
-                        seqlen_offset=seqlen_offset,
-                        cu_seqlens=cu_seqlens,
-                        max_seqlen=rotary_max_seqlen,
-                    )
-                if inference_params is None:
-                    if not self.checkpointing:
-                        context = self.inner_attn(qkv, **kwargs)
-                    else:
-                        context = torch.utils.checkpoint.checkpoint(
-                            self.inner_attn, qkv, **kwargs
-                        )
+
+            if self.rotary_emb_dim > 0:
+                qkv = self.rotary_emb(
+                    qkv,
+                    seqlen_offset=seqlen_offset,
+                    cu_seqlens=None,  # Don't pass cu_seqlens to rotary
+                    max_seqlen=rotary_max_seqlen,
+                )
+            if inference_params is None:
+                if not self.checkpointing:
+                    context = self.inner_attn(qkv, **kwargs)
                 else:
-                    context = self._update_kvcache_attention(
-                        qkv[:, :, 0], qkv[:, :, 1:], inference_params
+                    context = torch.utils.checkpoint.checkpoint(
+                        self.inner_attn, qkv, **kwargs
                     )
             else:
-                context = self._apply_rotary_update_kvcache_attention(
+                context = self._update_kvcache_attention(
                     qkv[:, :, 0], qkv[:, :, 1:], inference_params
                 )
         else:
@@ -782,33 +484,24 @@ class MHA(nn.Module):
                     self.dwconv_kv(rearrange(kv, "b s d -> b d s"))[..., :-2],
                     "b d s -> b s d",
                 ).contiguous()
-            if (
-                inference_params is None
-                or inference_params.seqlen_offset == 0
-                or (self.rotary_emb_dim == 0 or self.rotary_emb_dim % 16 != 0)
-                or not self.use_flash_attn
-            ):
-                if self.rotary_emb_dim > 0:
-                    q, kv = self.rotary_emb(
-                        q,
-                        kv,
-                        seqlen_offset=seqlen_offset,
-                        cu_seqlens=cu_seqlens,
-                        max_seqlen=rotary_max_seqlen,
-                    )
-                if inference_params is None:
-                    if not self.checkpointing:
-                        context = self.inner_cross_attn(q, kv, **kwargs)
-                    else:
-                        context = torch.utils.checkpoint.checkpoint(
-                            self.inner_cross_attn, q, kv, **kwargs
-                        )
-                else:
-                    context = self._update_kvcache_attention(q, kv, inference_params)
-            else:
-                context = self._apply_rotary_update_kvcache_attention(
-                    q, kv, inference_params
+
+            if self.rotary_emb_dim > 0:
+                q, kv = self.rotary_emb(
+                    q,
+                    kv,
+                    seqlen_offset=seqlen_offset,
+                    cu_seqlens=None,  # Don't pass cu_seqlens to rotary
+                    max_seqlen=rotary_max_seqlen,
                 )
+            if inference_params is None:
+                if not self.checkpointing:
+                    context = self.inner_cross_attn(q, kv, **kwargs)
+                else:
+                    context = torch.utils.checkpoint.checkpoint(
+                        self.inner_cross_attn, q, kv, **kwargs
+                    )
+            else:
+                context = self._update_kvcache_attention(q, kv, inference_params)
 
         inp = rearrange(context, "... h d -> ... (h d)")
         if adapter_mask is not None:

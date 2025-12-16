@@ -123,51 +123,13 @@ def _build_vision_tower(config: JinaCLIPVisionConfig) -> EVAVisionTransformer:
 
 
 def _resolve_attention_libs(config: JinaCLIPConfig):
-    use_text_flash_attn = (
-        config.use_text_flash_attn
-        if config.use_text_flash_attn is not None
-        else config.text_config.hf_model_config_kwargs.get('use_flash_attn', True)
-    )
+    # flash_attn dependency removed - always use PyTorch native attention
+    # xformers is optional for vision, check if available
     use_vision_xformers = (
         config.use_vision_xformers
         if config.use_vision_xformers is not None
         else config.vision_config.x_attention
     )
-
-    def _resolve_use_text_flash_attn() -> bool:
-        if use_text_flash_attn:
-            if not torch.cuda.is_available():
-                warnings.warn('Flash attention requires CUDA, disabling')
-                return False
-            if importlib.util.find_spec('flash_attn') is None:
-                warnings.warn(
-                    'Flash attention is not installed. Check '
-                    'https://github.com/Dao-AILab/flash-attention?'
-                    'tab=readme-ov-file#installation-and-features '
-                    'for installation instructions, disabling'
-                )
-                return False
-            major, minor, *_ = torch.version.cuda.split('.')
-            major, minor = int(major), int(minor)
-            if major < 11 or (major == 11 and minor < 7):
-                warnings.warn(
-                    'Flash attention requires CUDA>=11.7. Found version '
-                    f'{major}.{minor}, disabling'
-                )
-                return False
-            capability = torch.cuda.get_device_capability()
-            major, *_ = capability
-            major = int(major)
-            if major < 8:
-                device_name = torch.cuda.get_device_properties(0).name
-                warnings.warn(
-                    'Flash attention requires device capability>=8.0 (NVIDIA Ampere, '
-                    f'Hopper or ADA). Found device {device_name} with capability '
-                    f'{capability}, disabling'
-                )
-                return False
-            return True
-        return False
 
     def _resolve_use_vision_xformers() -> bool:
         if use_vision_xformers:
@@ -185,7 +147,7 @@ def _resolve_attention_libs(config: JinaCLIPConfig):
             return True
         return False
 
-    _use_text_flash_attn = _resolve_use_text_flash_attn()
+    _use_text_flash_attn = False  # Always disabled - using PyTorch native attention
     _use_vision_xformers = _resolve_use_vision_xformers()
 
     config.use_text_flash_attn = _use_text_flash_attn

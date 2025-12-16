@@ -1,4 +1,6 @@
 # This implementation was adapted from https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/modules/mlp.py
+# Modified to remove flash_attn dependency and use pure PyTorch implementation
+
 # Commit id: c3b219665292c61a51153d0ded4473c494296382
 
 # Copyright (c) 2023, Tri Dao.
@@ -8,21 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed import ProcessGroup
 
-try:
-    from flash_attn.ops.activations import swiglu
-except ImportError:
-    swiglu = None
-
-try:
-    from flash_attn.ops.fused_dense import (ColumnParallelLinear,
-                                            RowParallelLinear)
-except ImportError:
-    ColumnParallelLinear, RowParallelLinear = None, None
-
-try:
-    from flash_attn.ops.fused_dense import FusedMLP, ParallelFusedMLP
-except ImportError:
-    FusedMLP, ParallelFusedMLP = None, None
+# flash_attn dependencies removed - using pure PyTorch
+swiglu = None
+ColumnParallelLinear, RowParallelLinear = None, None
+FusedMLP, ParallelFusedMLP = None, None
 
 
 class Mlp(nn.Module):

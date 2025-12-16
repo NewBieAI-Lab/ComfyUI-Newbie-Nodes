@@ -1,4 +1,6 @@
 # This implementation was adopted from https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/models/bert.py
+# Modified to remove flash_attn/triton dependency and use pure PyTorch implementation
+
 # Commit id: abbc1311731867310635f9edc2a9ec18317c8c48
 # Copyright (c) 2022, Tri Dao.
 # This BERT implementation is based on our MLPerf 2.0 and MLPerf 2.1 BERT implementation.
@@ -7,7 +9,6 @@
 
 # Inspired by https://github.com/huggingface/transformers/blob/main/src/transformers/models/bert/modeling_bert.py
 
-import importlib.util
 import logging
 import re
 from collections import OrderedDict
@@ -38,21 +39,9 @@ from .mha import MHA
 from .mlp import FusedMLP, Mlp
 from .xlm_padding import index_first_axis_residual, pad_input, unpad_input
 
-try:
-    from flash_attn.ops.fused_dense import FusedDense
-except ImportError:
-    FusedDense = None
-
-try:
-    from flash_attn.ops.triton.layer_norm import layer_norm_fn
-except ImportError:
-    layer_norm_fn = None
-
-
-try:
-    from flash_attn.losses.cross_entropy import CrossEntropyLoss
-except ImportError:
-    CrossEntropyLoss = torch.nn.CrossEntropyLoss
+# flash_attn dependencies removed - using pure PyTorch
+FusedDense = None
+layer_norm_fn = None
 
 try:
     from tqdm.autonotebook import trange
@@ -64,14 +53,8 @@ logger = logging.getLogger(__name__)
 
 
 def get_use_flash_attn(config: XLMRobertaFlashConfig):
-    if not getattr(config, "use_flash_attn", False) or not torch.cuda.is_available():
-        return False
-    if importlib.util.find_spec("flash_attn") is None:
-        logger.warning(
-            "flash_attn is not installed. Using PyTorch native attention implementation."
-        )
-        return False
-    return True
+    # flash_attn dependency removed - always use PyTorch native attention
+    return False
 
 
 def create_mixer_cls(config, cross_attn=False, return_residual=False):
@@ -318,11 +301,8 @@ class XLMRobertaEncoder(nn.Module):
 class XLMRobertaPooler(nn.Module):
     def __init__(self, config):
         super().__init__()
-        fused_bias_fc = getattr(config, "fused_bias_fc", False)
-        if fused_bias_fc and FusedDense is None:
-            raise ImportError("fused_dense is not installed")
-        linear_cls = nn.Linear if not fused_bias_fc else FusedDense
-        self.dense = linear_cls(config.hidden_size, config.hidden_size)
+        # Always use standard nn.Linear (fused_bias_fc removed)
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
     def forward(self, hidden_states, pool=True, adapter_mask=None):
@@ -354,14 +334,8 @@ class XLMRobertaPooler(nn.Module):
 class XLMRobertaPredictionHeadTransform(nn.Module):
     def __init__(self, config):
         super().__init__()
-        fused_bias_fc = getattr(config, "fused_bias_fc", False)
-        if fused_bias_fc and FusedDense is None:
-            raise ImportError("fused_dense is not installed")
-        self.fused_dropout_add_ln = getattr(config, "fused_dropout_add_ln", False)
-        if self.fused_dropout_add_ln and layer_norm_fn is None:
-            raise ImportError("Triton is not installed")
-        linear_cls = nn.Linear if not fused_bias_fc else FusedDense
-        self.dense = linear_cls(config.hidden_size, config.hidden_size)
+        # Always use standard nn.Linear (fused_bias_fc removed)
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         approximate = (
             "tanh"
             if config.hidden_act in ["gelu_new", "gelu_fast", "gelu_pytorch_tanh"]
@@ -373,31 +347,18 @@ class XLMRobertaPredictionHeadTransform(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.transform_act_fn(hidden_states)
-        if not self.fused_dropout_add_ln:
-            hidden_states = self.layer_norm(hidden_states)
-        else:
-            hidden_states = layer_norm_fn(
-                hidden_states,
-                self.layer_norm.weight,
-                self.layer_norm.bias,
-                eps=self.layer_norm.eps,
-            )
+        hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 
 
 class XLMRobertaLMPredictionHead(nn.Module):
     def __init__(self, config):
         super().__init__()
-        fused_bias_fc = getattr(config, "fused_bias_fc", False)
-        if fused_bias_fc and FusedDense is None:
-            raise ImportError("fused_dense is not installed")
-        linear_cls = nn.Linear if not fused_bias_fc else FusedDense
-
         self.transform = XLMRobertaPredictionHeadTransform(config)
 
         # The output weights are the same as the input embeddings, but there is
         # an output-only bias for each token.
-        self.decoder = linear_cls(config.hidden_size, config.vocab_size, bias=True)
+        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
 
     def forward(self, hidden_states):
         hidden_states = self.transform(hidden_states)
@@ -450,9 +411,8 @@ class XLMRobertaModel(XLMRobertaPreTrainedModel):
             config.vocab_size += self.pad_vocab_size_multiple - (
                 config.vocab_size % self.pad_vocab_size_multiple
             )
-        self.fused_dropout_add_ln = getattr(config, "fused_dropout_add_ln", False)
-        if self.fused_dropout_add_ln and layer_norm_fn is None:
-            raise ImportError("Triton is not installed")
+        # fused_dropout_add_ln removed - always use standard implementation
+        self.fused_dropout_add_ln = False
         assert config.hidden_act in [
             "gelu",
             "gelu_new",
@@ -726,12 +686,7 @@ class XLMRobertaModel(XLMRobertaPreTrainedModel):
         )
         # TD [2022-12:18]: Don't need to force residual in fp32
         # BERT puts embedding LayerNorm before embedding dropout.
-        if not self.fused_dropout_add_ln:
-            hidden_states = self.emb_ln(hidden_states)
-        else:
-            hidden_states = layer_norm_fn(
-                hidden_states, self.emb_ln.weight, self.emb_ln.bias, eps=self.emb_ln.eps
-            )
+        hidden_states = self.emb_ln(hidden_states)
         hidden_states = self.emb_drop(hidden_states)
 
         if masked_tokens_mask is not None:
@@ -1156,18 +1111,15 @@ class XLMRobertaClassificationHead(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        fused_bias_fc = getattr(config, "fused_bias_fc", False)
-        if fused_bias_fc and FusedDense is None:
-            raise ImportError("fused_dense is not installed")
-        linear_cls = nn.Linear if not fused_bias_fc else FusedDense
-        self.dense = linear_cls(config.hidden_size, config.hidden_size)
+        # Always use standard nn.Linear (fused_bias_fc removed)
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         classifier_dropout = (
             config.classifier_dropout
             if config.classifier_dropout is not None
             else config.hidden_dropout_prob
         )
         self.dropout = nn.Dropout(classifier_dropout)
-        self.out_proj = linear_cls(config.hidden_size, config.num_labels)
+        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
 
     def forward(self, features, **kwargs):
         x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
