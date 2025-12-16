@@ -13,6 +13,15 @@ except ImportError:
     TRANSFORMERS_AVAILABLE = False
     print("Warning: transformers not available")
 
+# Import local jinaai modules (no longer depends on HuggingFace cache)
+try:
+    from .jinaai.jina_clip import JinaCLIPConfig, JinaCLIPModel
+    from .jinaai.xlm_roberta import XLMRobertaFlashConfig
+    JINAAI_LOCAL = True
+except ImportError:
+    JINAAI_LOCAL = False
+    print("Warning: local jinaai modules not available, will use trust_remote_code")
+
 
 class NewBieCLIP:
 
@@ -1136,17 +1145,38 @@ class NewBieCLIPLoader:
         print(f"Device: {device}, Dtype: {dtype}")
 
         try:
-            # Standard loading with trust_remote_code
-            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-            config.use_flash_attn = False
-            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            clip_model = AutoModel.from_pretrained(
-                model_path,
-                config=config,
-                torch_dtype=dtype,
-                device_map=device,
-                trust_remote_code=True
-            )
+            # Use local jinaai modules if available (no HuggingFace cache dependency)
+            if JINAAI_LOCAL:
+                print(f"[NewbieCLIP] Using local jinaai modules")
+
+                # Load config from pretrained path
+                config = JinaCLIPConfig.from_pretrained(model_path)
+                config.use_text_flash_attn = False
+                config.use_vision_xformers = False
+
+                # Load tokenizer
+                tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+                # Load model using local JinaCLIPModel class
+                clip_model = JinaCLIPModel.from_pretrained(
+                    model_path,
+                    config=config,
+                    torch_dtype=dtype,
+                )
+                clip_model = clip_model.to(device)
+            else:
+                # Fallback to trust_remote_code if local modules not available
+                print(f"[NewbieCLIP] Using trust_remote_code (local modules not available)")
+                config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+                config.use_flash_attn = False
+                tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                clip_model = AutoModel.from_pretrained(
+                    model_path,
+                    config=config,
+                    torch_dtype=dtype,
+                    device_map=device,
+                    trust_remote_code=True
+                )
 
             # Add hook to capture hidden states if weight processing is enabled
             if enable_jina_weights and hasattr(clip_model, 'text_model'):

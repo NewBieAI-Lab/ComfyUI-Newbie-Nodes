@@ -4,3 +4,6 @@
 /models/__pycache__
 /transport/__pycache__
 /util/__pycache__
+/jinaai/jina_clip/__pycache__
+/jinaai/xlm_roberta/__pycache__
+/jinaai/__pycache__
